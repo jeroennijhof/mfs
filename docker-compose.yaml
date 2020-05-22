@@ -1,0 +1,37 @@
+version: '3.7'
+
+services:
+  nats:
+    image: nats
+    ports:
+      - "4222:4222"
+    command: --auth test123 -V
+
+  mfs1:
+    build: .
+    depends_on:
+      - nats
+    volumes:
+      - data1:/data
+    command: -s nats:4222 -t test123 -p /data
+
+  mfs2:
+    build: .
+    depends_on:
+      - nats
+    volumes:
+      - data2:/data
+    command: -s nats:4222 -t test123 -p /data
+
+  mfs3:
+    build: .
+    depends_on:
+      - nats
+    volumes:
+      - data3:/data
+    command: -s nats:4222 -t test123 -p /data
+
+volumes:
+  data1: {}
+  data2: {}
+  data3: {}
