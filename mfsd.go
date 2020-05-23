@@ -1,11 +1,10 @@
 package main
 
 import (
-	"fmt"
-	"os"
+	"log"
 	"flag"
 	"time"
-	"github.com/fsnotify/fsnotify"
+	"github.com/radovskyb/watcher"
 	"mfs/mfs"
 )
 
@@ -32,26 +31,25 @@ func main() {
 	flag.Var(&servers, "s", "Server to connect to, define multiple for HA")
 	flag.Parse()
 
-	watcher, err := fsnotify.NewWatcher()
-	done := make(chan bool)
+	w := watcher.New()
 	go func() {
 		for {
 			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
+			case event := <-w.Event:
+				log.Println(event)
+				if event.Op == watcher.Create {
+					files[event.Path] = mfs.Create
 				}
-				if event.Op&fsnotify.Write == fsnotify.Write {
-					files[event.Name] = mfs.Sync
+				if event.Op == watcher.Write {
+					files[event.Path] = mfs.Sync
 				}
-				if event.Op&fsnotify.Remove == fsnotify.Remove {
-					files[event.Name] = mfs.Remove
+				if event.Op == watcher.Remove {
+					files[event.Path] = mfs.Remove
 				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				fmt.Println("error:", err)
+			case err := <-w.Error:
+				log.Println("error:", err)
+			case <-w.Closed:
+				return
 			}
 		}
 	}()
@@ -61,15 +59,16 @@ func main() {
 		for {
 			time.Sleep(time.Duration(interval) * time.Second)
 			mfsClient.Send(files)
-                        files = make(map[string]string)
+			files = make(map[string]string)
 		}
 	}(interval)
 	defer mfsClient.Close()
 
-	err = watcher.Add(path)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	if err := w.AddRecursive(path); err != nil {
+		log.Fatalln(err)
 	}
-	<-done
+
+	if err := w.Start(time.Millisecond * 100); err != nil {
+		log.Fatalln(err)
+	}
 }
