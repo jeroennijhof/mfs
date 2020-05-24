@@ -17,7 +17,7 @@ func (i *strArray) Set(value string) error {
 	return nil
 }
 
-var files = make(map[string]string)
+var files = make(map[string]watcher.Op)
 
 func main() {
 	var path string
@@ -36,18 +36,9 @@ func main() {
 		for {
 			select {
 			case event := <-w.Event:
-				log.Println(event)
-				if event.Op == watcher.Create {
-					files[event.Path] = mfs.Create
-				}
-				if event.Op == watcher.Write {
-					files[event.Path] = mfs.Sync
-				}
-				if event.Op == watcher.Remove {
-					files[event.Path] = mfs.Remove
-				}
+				files[event.Path] = event.Op
 			case err := <-w.Error:
-				log.Println("error:", err)
+				log.Println("mfsd error:", err)
 			case <-w.Closed:
 				return
 			}
@@ -59,16 +50,16 @@ func main() {
 		for {
 			time.Sleep(time.Duration(interval) * time.Second)
 			mfsClient.Send(files)
-			files = make(map[string]string)
+			files = make(map[string]watcher.Op)
 		}
 	}(interval)
 	defer mfsClient.Close()
 
 	if err := w.AddRecursive(path); err != nil {
-		log.Fatalln(err)
+		log.Fatalln("mfsd critical:", err)
 	}
 
 	if err := w.Start(time.Millisecond * 100); err != nil {
-		log.Fatalln(err)
+		log.Fatalln("mfsd critical:", err)
 	}
 }
