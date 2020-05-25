@@ -20,17 +20,16 @@ type MFSFile struct {
 	Type string
 	Hostname string
 	Path string
+	OldPath string
 	Mode uint32
 	Uid uint32
 	Gid uint32
 	Content []byte
 }
 
-var lockCreate string
-var lockWrite string
-var lockRemove string
+var lock = make(map[string]bool)
 
-// Helper functions
+// Helper recv functions
 func CreateDir(mfsFile *MFSFile) {
 	log.Println("mfs: creating directory", mfsFile.Path)
 	hostname, _ := os.Hostname()
@@ -80,49 +79,84 @@ func RemoveFile(mfsFile *MFSFile) {
 	}
 }
 
-func SendDir(ec *nats.EncodedConn, dir string) {
+func MoveFile(mfsFile *MFSFile) {
+	log.Println("mfs: moving file", mfsFile.OldPath, "to", mfsFile.Path)
 	hostname, _ := os.Hostname()
-	fileinfo, err := os.Stat(dir)
+	if hostname == mfsFile.Hostname {
+		log.Println("mfs: skip moving file, same host")
+		return
+	}
+	err := os.Rename(mfsFile.OldPath, mfsFile.Path)
 	if err != nil {
 		log.Println("mfs error:", err)
-		return
 	}
-	if !fileinfo.IsDir() {
-		return
-	}
-	stat, _ := fileinfo.Sys().(*syscall.Stat_t)
+}
 
-	mfsFile := &MFSFile{Type: watcher.Create.String(), Hostname: hostname, Path: dir,
+func ChmodFile(mfsFile *MFSFile) {
+	log.Println("mfs: chmod file", mfsFile.Path)
+	hostname, _ := os.Hostname()
+	if hostname == mfsFile.Hostname {
+		log.Println("mfs: skip chmod file, same host")
+		return
+	}
+	err := os.Chmod(mfsFile.Path, os.FileMode(mfsFile.Mode))
+	if err != nil {
+		log.Println("mfs error:", err)
+	}
+}
+
+// Helper send functions
+func SendDir(ec *nats.EncodedConn, event watcher.Event) {
+	hostname, _ := os.Hostname()
+	if !event.FileInfo.IsDir() {
+		return
+	}
+	stat, _ := event.FileInfo.Sys().(*syscall.Stat_t)
+
+	mfsFile := &MFSFile{Type: watcher.Create.String(), Hostname: hostname, Path: event.Path,
 		Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid}
 	ec.Publish(watcher.Create.String(), mfsFile)
 }
 
-func SendFile(ec *nats.EncodedConn, file string) {
+func SendFile(ec *nats.EncodedConn, event watcher.Event) {
 	hostname, _ := os.Hostname()
-	fileinfo, err := os.Stat(file)
-	if err != nil {
-		log.Println("mfs error:", err)
+	if event.FileInfo.IsDir() {
 		return
 	}
-	if fileinfo.IsDir() {
-		return
-	}
-	stat, _ := fileinfo.Sys().(*syscall.Stat_t)
-	content, err := ioutil.ReadFile(file)
+	stat, _ := event.FileInfo.Sys().(*syscall.Stat_t)
+	content, err := ioutil.ReadFile(event.Path)
 	if err != nil {
 		log.Println("mfs error:", err)
 		return
 	}
 
-	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, Path: file,
+	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, Path: event.Path,
 		Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid, Content: content}
 	ec.Publish(watcher.Write.String(), mfsFile)
 }
 
-func SendRemoveFile(ec *nats.EncodedConn, file string) {
+func SendRemoveFile(ec *nats.EncodedConn, event watcher.Event) {
 	hostname, _ := os.Hostname()
-	mfsFile := &MFSFile{Type: watcher.Remove.String(), Hostname: hostname, Path: file}
+
+	mfsFile := &MFSFile{Type: watcher.Remove.String(), Hostname: hostname, Path: event.Path}
 	ec.Publish(watcher.Remove.String(), mfsFile)
+}
+
+func SendMoveFile(ec *nats.EncodedConn, event watcher.Event) {
+	hostname, _ := os.Hostname()
+
+	mfsFile := &MFSFile{Type: watcher.Move.String(), Hostname: hostname, Path: event.Path,
+		OldPath: event.OldPath}
+	ec.Publish(watcher.Move.String(), mfsFile)
+}
+
+func SendChmodFile(ec *nats.EncodedConn, event watcher.Event) {
+	hostname, _ := os.Hostname()
+	stat, _ := event.FileInfo.Sys().(*syscall.Stat_t)
+
+	mfsFile := &MFSFile{Type: watcher.Chmod.String(), Hostname: hostname, Path: event.Path,
+		Mode: stat.Mode}
+	ec.Publish(watcher.Chmod.String(), mfsFile)
 }
 
 // Public functions
@@ -141,46 +175,69 @@ func Client(servers []string, token string, interval int) MFS {
 
 	mfsClient := MFS {Url: url, Ec: ec}
 	ec.Subscribe(watcher.Create.String(), func(mfsFile *MFSFile) {
-		lockCreate = mfsFile.Path
+		lock[mfsFile.Path] = true
 		CreateDir(mfsFile)
 		go func(interval int) {
 			time.Sleep(time.Duration(interval) * time.Second)
-			lockCreate = ""
+			delete(lock, mfsFile.Path)
 		}(interval)
 	})
 	ec.Subscribe(watcher.Write.String(), func(mfsFile *MFSFile) {
-		lockWrite = mfsFile.Path
+		lock[mfsFile.Path] = true
 		WriteFile(mfsFile)
 		go func(interval int) {
 			time.Sleep(time.Duration(interval) * time.Second)
-			lockWrite = ""
+			delete(lock, mfsFile.Path)
 		}(interval)
 	})
 	ec.Subscribe(watcher.Remove.String(), func(mfsFile *MFSFile) {
-		lockRemove = mfsFile.Path
+		lock[mfsFile.Path] = true
 		RemoveFile(mfsFile)
 		go func(interval int) {
 			time.Sleep(time.Duration(interval) * time.Second)
-			lockRemove = ""
+			delete(lock, mfsFile.Path)
+		}(interval)
+	})
+	ec.Subscribe(watcher.Move.String(), func(mfsFile *MFSFile) {
+		lock[mfsFile.Path] = true
+		MoveFile(mfsFile)
+		go func(interval int) {
+			time.Sleep(time.Duration(interval) * time.Second)
+			delete(lock, mfsFile.Path)
+		}(interval)
+	})
+	ec.Subscribe(watcher.Chmod.String(), func(mfsFile *MFSFile) {
+		lock[mfsFile.Path] = true
+		ChmodFile(mfsFile)
+		go func(interval int) {
+			time.Sleep(time.Duration(interval) * time.Second)
+			delete(lock, mfsFile.Path)
 		}(interval)
 	})
 	return mfsClient
 }
 
-func (m MFS) Send(files map[string]watcher.Op) {
+func (m MFS) Send(files map[string]watcher.Event) {
 	for key := range files {
-		if key == lockCreate || key == lockWrite || key == lockRemove {
+		if lock[key] {
 			continue
 		}
-		if files[key] == watcher.Create {
-			SendDir(m.Ec, key)
-			SendFile(m.Ec, key)
+		log.Println(files[key])
+		if files[key].Op == watcher.Create {
+			SendDir(m.Ec, files[key])
+			SendFile(m.Ec, files[key])
 		}
-		if files[key] == watcher.Write {
-			SendFile(m.Ec, key)
+		if files[key].Op == watcher.Write {
+			SendFile(m.Ec, files[key])
 		}
-		if files[key] == watcher.Remove {
-			SendRemoveFile(m.Ec, key)
+		if files[key].Op == watcher.Remove {
+			SendRemoveFile(m.Ec, files[key])
+		}
+		if files[key].Op == watcher.Rename || files[key].Op == watcher.Move {
+			SendMoveFile(m.Ec, files[key])
+		}
+		if files[key].Op == watcher.Chmod {
+			SendChmodFile(m.Ec, files[key])
 		}
 	}
 }

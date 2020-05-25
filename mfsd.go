@@ -17,7 +17,7 @@ func (i *strArray) Set(value string) error {
 	return nil
 }
 
-var files = make(map[string]watcher.Op)
+var files = make(map[string]watcher.Event)
 
 func main() {
 	var path string
@@ -36,7 +36,7 @@ func main() {
 		for {
 			select {
 			case event := <-w.Event:
-				files[event.Path] = event.Op
+				files[event.Path] = event
 			case err := <-w.Error:
 				log.Println("mfsd error:", err)
 			case <-w.Closed:
@@ -50,7 +50,7 @@ func main() {
 		for {
 			time.Sleep(time.Duration(interval) * time.Second)
 			mfsClient.Send(files)
-			files = make(map[string]watcher.Op)
+			files = make(map[string]watcher.Event)
 		}
 	}(interval)
 	defer mfsClient.Close()
