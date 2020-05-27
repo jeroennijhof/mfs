@@ -18,7 +18,7 @@ services:
   mfs2:
     build: .
     depends_on:
-      - nats
+      - mfs1
     volumes:
       - data2:/data
     command: -s nats:4222 -t test123 -p /data
@@ -26,7 +26,7 @@ services:
   mfs3:
     build: .
     depends_on:
-      - nats
+      - mfs1
     volumes:
       - data3:/data
     command: -s nats:4222 -t test123 -p /data
