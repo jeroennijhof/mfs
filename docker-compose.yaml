@@ -13,7 +13,7 @@ services:
       - nats
     volumes:
       - data1:/data
-    command: -s nats:4222 -t test123 -p /data
+    command: -s nats:4222 -t test123 -p /data -S
 
   mfs2:
     build: .
