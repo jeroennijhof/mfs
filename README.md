@@ -23,7 +23,7 @@ Usage of ./mfsd:
   -p string
        Path to files which need to be synced (default "/data")
   -s value
-       NATS <host>:<port>, define multiple for high availability
+       NATS host:port, define multiple for high availability
   -t string
        NATS Authentication Token (default "token")
 </pre>
