@@ -28,9 +28,9 @@ func main() {
 
 	flag.StringVar(&path, "p", "/data", "Path to files which need to be synced")
 	flag.IntVar(&interval, "i", 2, "Sync interval in seconds")
-	flag.StringVar(&token, "t", "token", "Authentication Token")
-	flag.Var(&servers, "s", "Server to connect to, define multiple for HA")
-	flag.BoolVar(&sync, "S", false, "This instance will act as sync master")
+	flag.StringVar(&token, "t", "token", "NATS Authentication Token")
+	flag.Var(&servers, "s", "NATS <host>:<port>, define multiple for high availability")
+	flag.BoolVar(&sync, "S", false, "This instance will act as sync worker")
 	flag.Parse()
 
 	w := watcher.New()

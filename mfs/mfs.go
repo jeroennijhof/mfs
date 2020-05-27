@@ -30,12 +30,12 @@ type MFSFile struct {
 }
 
 type MFSSync struct {
-	Type string
 	Hostname string
 	Status string
 }
 
 const Sync = "SYNC"
+const SyncReply = "SYNCREPLY"
 const Request = "REQUEST"
 const Response = "RESPONSE"
 var lock = make(map[string]bool)
@@ -44,9 +44,11 @@ var lock = make(map[string]bool)
 func Skip(mfsFile *MFSFile) bool {
 	hostname, _ := os.Hostname()
 	if hostname == mfsFile.Hostname {
+		log.Println("mfs: skip same host")
 		return true
 	}
 	if mfsFile.TargetHost != "" && mfsFile.TargetHost != hostname {
+		log.Println("mfs: skip sync request")
 		return true
 	}
 	return false
@@ -55,7 +57,6 @@ func Skip(mfsFile *MFSFile) bool {
 func CreateDir(mfsFile *MFSFile) {
 	log.Println("mfs: creating directory", mfsFile.Path)
 	if Skip(mfsFile) {
-		log.Println("mfs: skip creating directory")
 		return
 	}
 	err := os.Mkdir(mfsFile.Path, os.FileMode(mfsFile.Mode))
@@ -72,7 +73,6 @@ func CreateDir(mfsFile *MFSFile) {
 func WriteFile(mfsFile *MFSFile) {
 	log.Println("mfs: writing file", mfsFile.Path)
 	if Skip(mfsFile) {
-		log.Println("mfs: skip writing file")
 		return
 	}
 	err := ioutil.WriteFile(mfsFile.Path, mfsFile.Content, os.FileMode(mfsFile.Mode))
@@ -89,7 +89,6 @@ func WriteFile(mfsFile *MFSFile) {
 func RemoveFile(mfsFile *MFSFile) {
 	log.Println("mfs: removing file", mfsFile.Path)
 	if Skip(mfsFile) {
-		log.Println("mfs: skip removing file")
 		return
 	}
 	err := os.Remove(mfsFile.Path)
@@ -101,7 +100,6 @@ func RemoveFile(mfsFile *MFSFile) {
 func MoveFile(mfsFile *MFSFile) {
 	log.Println("mfs: moving file", mfsFile.OldPath, "to", mfsFile.Path)
 	if Skip(mfsFile) {
-		log.Println("mfs: skip moving file")
 		return
 	}
 	err := os.Rename(mfsFile.OldPath, mfsFile.Path)
@@ -113,7 +111,6 @@ func MoveFile(mfsFile *MFSFile) {
 func ChmodFile(mfsFile *MFSFile) {
 	log.Println("mfs: chmod file", mfsFile.Path)
 	if Skip(mfsFile) {
-		log.Println("mfs: skip chmod file")
 		return
 	}
 	err := os.Chmod(mfsFile.Path, os.FileMode(mfsFile.Mode))
@@ -195,22 +192,22 @@ func SyncFiles(ec *nats.EncodedConn, mfsSync *MFSSync, path string) {
 	if err != nil {
 		log.Println(err)
 	}
-	mfsSyncReply := &MFSSync{Type: Response, Hostname: mfsSync.Hostname, Status: "done"}
-	ec.Publish(Sync, mfsSyncReply)
+	mfsSyncReply := &MFSSync{Hostname: mfsSync.Hostname, Status: "done"}
+	ec.Publish(SyncReply, mfsSyncReply)
 }
 
 func SyncClient(ec *nats.EncodedConn) {
 	hostname, _ := os.Hostname()
 	status := "waiting"
 
-	subSync, _ := ec.Subscribe(Sync, func(mfsSync *MFSSync) {
-		if mfsSync.Type == Response &&  mfsSync.Hostname == hostname {
+	subSyncReply, _ := ec.Subscribe(SyncReply, func(mfsSync *MFSSync) {
+		if mfsSync.Hostname == hostname {
 			status = mfsSync.Status
 		}
 	})
 
 	log.Println("mfs: init sync started")
-	mfsSync := &MFSSync{Type: Request, Hostname: hostname}
+	mfsSync := &MFSSync{Hostname: hostname}
 	ec.Publish(Sync, mfsSync)
 
 	//Wait for Sync message complete
@@ -221,7 +218,7 @@ func SyncClient(ec *nats.EncodedConn) {
 			break
 		}
 	}
-	subSync.Unsubscribe()
+	subSyncReply.Unsubscribe()
 }
 
 // Public functions
@@ -280,10 +277,9 @@ func Client(servers []string, token string, interval int, sync bool, path string
 		}(interval)
 	})
 	if sync {
-		ec.Subscribe(Sync, func(mfsSync *MFSSync) {
-			if mfsSync.Type == Request {
-				SyncFiles(ec, mfsSync, path)
-			}
+		// Use nats queue group for init sync
+		ec.QueueSubscribe(Sync, "sync_workers", func(mfsSync *MFSSync) {
+			SyncFiles(ec, mfsSync, path)
 		})
 	} else {
 		SyncClient(ec)
