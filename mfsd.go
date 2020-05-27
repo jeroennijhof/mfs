@@ -24,11 +24,13 @@ func main() {
 	var interval int
 	var token string
 	var servers strArray
+	var sync bool
 
 	flag.StringVar(&path, "p", "/data", "Path to files which need to be synced")
 	flag.IntVar(&interval, "i", 2, "Sync interval in seconds")
 	flag.StringVar(&token, "t", "token", "Authentication Token")
 	flag.Var(&servers, "s", "Server to connect to, define multiple for HA")
+	flag.BoolVar(&sync, "S", false, "This instance will act as sync master")
 	flag.Parse()
 
 	w := watcher.New()
@@ -45,7 +47,7 @@ func main() {
 		}
 	}()
 
-	mfsClient := mfs.Client(servers, token, interval)
+	mfsClient := mfs.Client(servers, token, interval, sync, path)
 	go func(interval int) {
 		for {
 			time.Sleep(time.Duration(interval) * time.Second)

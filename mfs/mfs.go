@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"syscall"
 	"time"
+	"path/filepath"
 	"github.com/radovskyb/watcher"
 	nats "github.com/nats-io/nats.go"
 )
@@ -19,6 +20,7 @@ type MFS struct {
 type MFSFile struct {
 	Type string
 	Hostname string
+	TargetHost string
 	Path string
 	OldPath string
 	Mode uint32
@@ -27,14 +29,33 @@ type MFSFile struct {
 	Content []byte
 }
 
+type MFSSync struct {
+	Type string
+	Hostname string
+	Status string
+}
+
+const Sync = "SYNC"
+const Request = "REQUEST"
+const Response = "RESPONSE"
 var lock = make(map[string]bool)
 
 // Helper recv functions
-func CreateDir(mfsFile *MFSFile) {
-	log.Println("mfs: creating directory", mfsFile.Path)
+func Skip(mfsFile *MFSFile) bool {
 	hostname, _ := os.Hostname()
 	if hostname == mfsFile.Hostname {
-		log.Println("mfs: skip creating directory, same host")
+		return true
+	}
+	if mfsFile.TargetHost != "" && mfsFile.TargetHost != hostname {
+		return true
+	}
+	return false
+}
+
+func CreateDir(mfsFile *MFSFile) {
+	log.Println("mfs: creating directory", mfsFile.Path)
+	if Skip(mfsFile) {
+		log.Println("mfs: skip creating directory")
 		return
 	}
 	err := os.Mkdir(mfsFile.Path, os.FileMode(mfsFile.Mode))
@@ -50,9 +71,8 @@ func CreateDir(mfsFile *MFSFile) {
 
 func WriteFile(mfsFile *MFSFile) {
 	log.Println("mfs: writing file", mfsFile.Path)
-	hostname, _ := os.Hostname()
-	if hostname == mfsFile.Hostname {
-		log.Println("mfs: skip writing file, same host")
+	if Skip(mfsFile) {
+		log.Println("mfs: skip writing file")
 		return
 	}
 	err := ioutil.WriteFile(mfsFile.Path, mfsFile.Content, os.FileMode(mfsFile.Mode))
@@ -68,9 +88,8 @@ func WriteFile(mfsFile *MFSFile) {
 
 func RemoveFile(mfsFile *MFSFile) {
 	log.Println("mfs: removing file", mfsFile.Path)
-	hostname, _ := os.Hostname()
-	if hostname == mfsFile.Hostname {
-		log.Println("mfs: skip removing file, same host")
+	if Skip(mfsFile) {
+		log.Println("mfs: skip removing file")
 		return
 	}
 	err := os.Remove(mfsFile.Path)
@@ -81,9 +100,8 @@ func RemoveFile(mfsFile *MFSFile) {
 
 func MoveFile(mfsFile *MFSFile) {
 	log.Println("mfs: moving file", mfsFile.OldPath, "to", mfsFile.Path)
-	hostname, _ := os.Hostname()
-	if hostname == mfsFile.Hostname {
-		log.Println("mfs: skip moving file, same host")
+	if Skip(mfsFile) {
+		log.Println("mfs: skip moving file")
 		return
 	}
 	err := os.Rename(mfsFile.OldPath, mfsFile.Path)
@@ -94,9 +112,8 @@ func MoveFile(mfsFile *MFSFile) {
 
 func ChmodFile(mfsFile *MFSFile) {
 	log.Println("mfs: chmod file", mfsFile.Path)
-	hostname, _ := os.Hostname()
-	if hostname == mfsFile.Hostname {
-		log.Println("mfs: skip chmod file, same host")
+	if Skip(mfsFile) {
+		log.Println("mfs: skip chmod file")
 		return
 	}
 	err := os.Chmod(mfsFile.Path, os.FileMode(mfsFile.Mode))
@@ -106,19 +123,19 @@ func ChmodFile(mfsFile *MFSFile) {
 }
 
 // Helper send functions
-func SendDir(ec *nats.EncodedConn, event watcher.Event) {
+func SendDir(ec *nats.EncodedConn, event watcher.Event, target string) {
 	hostname, _ := os.Hostname()
 	if !event.FileInfo.IsDir() {
 		return
 	}
 	stat, _ := event.FileInfo.Sys().(*syscall.Stat_t)
 
-	mfsFile := &MFSFile{Type: watcher.Create.String(), Hostname: hostname, Path: event.Path,
-		Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid}
+	mfsFile := &MFSFile{Type: watcher.Create.String(), Hostname: hostname, TargetHost: target,
+		Path: event.Path, Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid}
 	ec.Publish(watcher.Create.String(), mfsFile)
 }
 
-func SendFile(ec *nats.EncodedConn, event watcher.Event) {
+func SendFile(ec *nats.EncodedConn, event watcher.Event, target string) {
 	hostname, _ := os.Hostname()
 	if event.FileInfo.IsDir() {
 		return
@@ -130,8 +147,8 @@ func SendFile(ec *nats.EncodedConn, event watcher.Event) {
 		return
 	}
 
-	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, Path: event.Path,
-		Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid, Content: content}
+	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, TargetHost: target,
+		Path: event.Path, Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid, Content: content}
 	ec.Publish(watcher.Write.String(), mfsFile)
 }
 
@@ -159,8 +176,56 @@ func SendChmodFile(ec *nats.EncodedConn, event watcher.Event) {
 	ec.Publish(watcher.Chmod.String(), mfsFile)
 }
 
+// Helper init sync functions
+func SyncFiles(ec *nats.EncodedConn, mfsSync *MFSSync, path string) {
+	// Get all directories and files and send them to client
+	err := filepath.Walk(path,
+		func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		event := watcher.Event{Path: path, FileInfo: info}
+		if info.IsDir() {
+			SendDir(ec, event, mfsSync.Hostname)
+		} else {
+			SendFile(ec, event, mfsSync.Hostname)
+		}
+		return nil
+	})
+	if err != nil {
+		log.Println(err)
+	}
+	mfsSyncReply := &MFSSync{Type: Response, Hostname: mfsSync.Hostname, Status: "done"}
+	ec.Publish(Sync, mfsSyncReply)
+}
+
+func SyncClient(ec *nats.EncodedConn) {
+	hostname, _ := os.Hostname()
+	status := "waiting"
+
+	subSync, _ := ec.Subscribe(Sync, func(mfsSync *MFSSync) {
+		if mfsSync.Type == Response &&  mfsSync.Hostname == hostname {
+			status = mfsSync.Status
+		}
+	})
+
+	log.Println("mfs: init sync started")
+	mfsSync := &MFSSync{Type: Request, Hostname: hostname}
+	ec.Publish(Sync, mfsSync)
+
+	//Wait for Sync message complete
+	for {
+		time.Sleep(time.Duration(1) * time.Second)
+		if status != "waiting" {
+			log.Println("mfs: init sync done")
+			break
+		}
+	}
+	subSync.Unsubscribe()
+}
+
 // Public functions
-func Client(servers []string, token string, interval int) MFS {
+func Client(servers []string, token string, interval int, sync bool, path string) MFS {
 	url := strings.Join(servers, ", nats://")
 	url = strings.Join([]string{"nats://", url}, "")
 
@@ -214,6 +279,15 @@ func Client(servers []string, token string, interval int) MFS {
 			delete(lock, mfsFile.Path)
 		}(interval)
 	})
+	if sync {
+		ec.Subscribe(Sync, func(mfsSync *MFSSync) {
+			if mfsSync.Type == Request {
+				SyncFiles(ec, mfsSync, path)
+			}
+		})
+	} else {
+		SyncClient(ec)
+	}
 	return mfsClient
 }
 
@@ -224,11 +298,11 @@ func (m MFS) Send(files map[string]watcher.Event) {
 		}
 		log.Println(files[key])
 		if files[key].Op == watcher.Create {
-			SendDir(m.Ec, files[key])
-			SendFile(m.Ec, files[key])
+			SendDir(m.Ec, files[key], "")
+			SendFile(m.Ec, files[key], "")
 		}
 		if files[key].Op == watcher.Write {
-			SendFile(m.Ec, files[key])
+			SendFile(m.Ec, files[key], "")
 		}
 		if files[key].Op == watcher.Remove {
 			SendRemoveFile(m.Ec, files[key])
