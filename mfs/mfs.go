@@ -71,6 +71,9 @@ func CreateDir(mfsFile *MFSFile) {
 }
 
 func WriteFile(mfsFile *MFSFile) {
+	if mfsFile.OldPath != "" {
+		return
+	}
 	log.Println("mfs: writing file", mfsFile.Path)
 	if Skip(mfsFile) {
 		return
@@ -83,6 +86,21 @@ func WriteFile(mfsFile *MFSFile) {
 	err = os.Chown(mfsFile.Path, int(mfsFile.Uid), int(mfsFile.Gid))
 	if err != nil {
 		log.Println("mfs error:", err)
+	}
+}
+
+func CreateSymlink(mfsFile *MFSFile) {
+	if mfsFile.OldPath == "" {
+		return
+	}
+	log.Println("mfs: creating symlink", mfsFile.Path)
+	if Skip(mfsFile) {
+		return
+	}
+	err := os.Symlink(mfsFile.OldPath, mfsFile.Path)
+	if err != nil {
+		log.Println("mfs error:", err)
+		return
 	}
 }
 
@@ -134,7 +152,7 @@ func SendDir(ec *nats.EncodedConn, event watcher.Event, target string) {
 
 func SendFile(ec *nats.EncodedConn, event watcher.Event, target string) {
 	hostname, _ := os.Hostname()
-	if event.FileInfo.IsDir() {
+	if event.FileInfo.IsDir() || event.FileInfo.Mode()&os.ModeSymlink != 0 {
 		return
 	}
 	stat, _ := event.FileInfo.Sys().(*syscall.Stat_t)
@@ -146,6 +164,22 @@ func SendFile(ec *nats.EncodedConn, event watcher.Event, target string) {
 
 	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, TargetHost: target,
 		Path: event.Path, Mode: stat.Mode, Uid: stat.Uid, Gid: stat.Gid, Content: content}
+	ec.Publish(watcher.Write.String(), mfsFile)
+}
+
+func SendSymlink(ec *nats.EncodedConn, event watcher.Event, target string) {
+	hostname, _ := os.Hostname()
+	if event.FileInfo.Mode()&os.ModeSymlink == 0 {
+		return
+	}
+	link, err := os.Readlink(event.Path)
+	if err != nil {
+		log.Println("mfs error:", err)
+		return
+	}
+
+	mfsFile := &MFSFile{Type: watcher.Write.String(), Hostname: hostname, TargetHost: target,
+		Path: event.Path, OldPath: link}
 	ec.Publish(watcher.Write.String(), mfsFile)
 }
 
@@ -182,11 +216,9 @@ func SyncFiles(ec *nats.EncodedConn, mfsSync *MFSSync, path string) {
 			return err
 		}
 		event := watcher.Event{Path: path, FileInfo: info}
-		if info.IsDir() {
-			SendDir(ec, event, mfsSync.Hostname)
-		} else {
-			SendFile(ec, event, mfsSync.Hostname)
-		}
+		SendDir(ec, event, mfsSync.Hostname)
+		SendFile(ec, event, mfsSync.Hostname)
+		SendSymlink(ec, event, mfsSync.Hostname)
 		return nil
 	})
 	if err != nil {
@@ -247,6 +279,7 @@ func Client(servers []string, token string, interval int, sync bool, path string
 	ec.Subscribe(watcher.Write.String(), func(mfsFile *MFSFile) {
 		lock[mfsFile.Path] = true
 		WriteFile(mfsFile)
+		CreateSymlink(mfsFile)
 		go func(interval int) {
 			time.Sleep(time.Duration(interval) * time.Second)
 			delete(lock, mfsFile.Path)
@@ -296,6 +329,7 @@ func (m MFS) Send(files map[string]watcher.Event) {
 		if files[key].Op == watcher.Create {
 			SendDir(m.Ec, files[key], "")
 			SendFile(m.Ec, files[key], "")
+			SendSymlink(m.Ec, files[key], "")
 		}
 		if files[key].Op == watcher.Write {
 			SendFile(m.Ec, files[key], "")
